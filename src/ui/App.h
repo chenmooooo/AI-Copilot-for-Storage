@@ -39,6 +39,7 @@ private:
     void renderConfigDialog();
 
     void scanPath(const std::wstring& path);
+    void openFolderPicker();
     void analyzeSelectedNode();
     void updateFileTree(const FileNode* node, int depth);
 

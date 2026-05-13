@@ -13,7 +13,7 @@ public:
     void setRootPath(const std::wstring& path);
     void setProgressCallback(ProgressCallback cb);
 
-    FileNode* scan();
+    std::unique_ptr<FileNode> scan();
     void cancel();
 
     int64_t totalBytes() const { return m_totalBytes; }
@@ -24,4 +24,8 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
+    int64_t m_totalBytes = 0;
+    size_t m_totalFiles = 0;
+    size_t m_totalDirs = 0;
+    double m_elapsedMs = 0.0;
 };

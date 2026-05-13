@@ -4,16 +4,51 @@
 #include "rule/RuleEngine.h"
 #include "db/Database.h"
 #include "core/FileNode.h"
+#include "core/Scanner.h"
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx11.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <shobjidl.h>
 
 #include <sstream>
 #include <iomanip>
 #include <ctime>
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
+static std::string formatSize(int64_t bytes) {
+    const char* units[] = { "B", "KB", "MB", "GB", "TB" };
+    int unit = 0;
+    double d = (double)bytes;
+    while (d >= 1024.0 && unit < 4) { d /= 1024.0; unit++; }
+    char buf[32];
+    if (unit == 0) snprintf(buf, sizeof(buf), "%lld B", (long long)bytes);
+    else           snprintf(buf, sizeof(buf), "%.2f %s", d, units[unit]);
+    return buf;
+}
+
+static std::string formatTime(const std::chrono::system_clock::time_point& tp) {
+    if (tp == std::chrono::system_clock::time_point{}) return "-";
+    auto tt = std::chrono::system_clock::to_time_t(tp);
+    struct tm local;
+    localtime_s(&local, &tt);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &local);
+    return buf;
+}
+
+static std::string formatFileType(FileType type) {
+    switch (type) {
+    case FileType::Directory: return "Dir";
+    case FileType::File:      return "File";
+    case FileType::Symlink:   return "Link";
+    default:                  return "?";
+    }
+}
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -146,6 +181,8 @@ bool App::init(int width, int height, const char* title) {
     ShowWindow(m_impl->hwnd, SW_SHOWDEFAULT);
     UpdateWindow(m_impl->hwnd);
 
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
     setupImGui();
     m_database->open();
 
@@ -238,6 +275,8 @@ void App::shutdown() {
     UnregisterClassW(m_impl->wc.lpszClassName, m_impl->wc.hInstance);
 
     m_database->close();
+
+    CoUninitialize();
 }
 
 void App::renderMainMenuBar() {
@@ -263,8 +302,14 @@ void App::renderMainMenuBar() {
 
 void App::renderScannerPanel() {
     ImGui::Begin("Scanner");
-    ImGui::SetNextItemWidth(-1);
+
+    float browseBtnWidth = 80.0f;
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - browseBtnWidth - ImGui::GetStyle().ItemSpacing.x);
     ImGui::InputText("##path", m_impl->pathInput, sizeof(m_impl->pathInput));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...", ImVec2(browseBtnWidth, 0))) {
+        openFolderPicker();
+    }
 
     if (ImGui::Button("Scan", ImVec2(120, 0))) {
         std::wstring wpath;
@@ -282,10 +327,12 @@ void App::renderScannerPanel() {
         ImGui::Text("Scanning...");
     }
 
-    if (m_impl->scanBytes > 0) {
-        double gb = m_impl->scanBytes / (1024.0 * 1024.0 * 1024.0);
-        ImGui::Text("Size: %.2f GB  Files: %zu  Dirs: %zu",
-            gb, m_impl->scanFiles, m_impl->scanDirs);
+    if (m_impl->scanRoot) {
+        ImGui::Separator();
+        ImGui::Text("Path: %s", m_impl->scanRoot->narrowPath().c_str());
+        ImGui::Text("Type: %s", m_impl->scanRoot->isDirectory() ? "Directory" : "File");
+        ImGui::Text("Size: %s", formatSize(m_impl->scanBytes).c_str());
+        ImGui::Text("Files: %zu  Dirs: %zu", m_impl->scanFiles, m_impl->scanDirs);
     }
 
     ImGui::End();
@@ -317,15 +364,10 @@ void App::updateFileTree(const FileNode* node, int depth) {
         label += "/";
     }
 
-    std::string sizeStr;
-    if (node->sizeBytes > 0) {
-        double gb = node->sizeBytes / (1024.0 * 1024.0 * 1024.0);
-        char buf[32];
-        snprintf(buf, sizeof(buf), " (%.2f GB)", gb);
-        sizeStr = buf;
-    }
-
-    label += sizeStr;
+    label += "  (" + formatFileType(node->type);
+    label += ", " + formatSize(node->sizeBytes);
+    label += ", " + formatTime(node->lastModified);
+    label += ")";
 
     bool open = ImGui::TreeNodeEx(node, flags, "%s", label.c_str());
     if (ImGui::IsItemClicked()) {
@@ -488,9 +530,49 @@ void App::renderConfigDialog() {
 }
 
 void App::scanPath(const std::wstring& path) {
-    (void)path;
     m_impl->scanning = true;
+    m_impl->selectedNode = nullptr;
+    m_impl->aiResponse.clear();
+
+    Scanner scanner;
+    scanner.setRootPath(path);
+    m_impl->scanRoot = scanner.scan();
+    m_impl->scanBytes = scanner.totalBytes();
+    m_impl->scanFiles = scanner.totalFiles();
+    m_impl->scanDirs = scanner.totalDirs();
+
     m_impl->scanning = false;
+}
+
+void App::openFolderPicker() {
+    IFileOpenDialog* pFolderDlg = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&pFolderDlg));
+    if (FAILED(hr)) return;
+
+    DWORD dwOptions;
+    pFolderDlg->GetOptions(&dwOptions);
+    pFolderDlg->SetOptions(dwOptions | FOS_PICKFOLDERS);
+
+    hr = pFolderDlg->Show(m_impl->hwnd);
+    if (SUCCEEDED(hr)) {
+        IShellItem* pItem = nullptr;
+        hr = pFolderDlg->GetResult(&pItem);
+        if (SUCCEEDED(hr)) {
+            PWSTR pszPath = nullptr;
+            hr = pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath);
+            if (SUCCEEDED(hr)) {
+                int len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, nullptr, 0, nullptr, nullptr);
+                if (len > 0 && len <= (int)sizeof(m_impl->pathInput)) {
+                    WideCharToMultiByte(CP_UTF8, 0, pszPath, -1,
+                                        m_impl->pathInput, sizeof(m_impl->pathInput), nullptr, nullptr);
+                }
+                CoTaskMemFree(pszPath);
+            }
+            pItem->Release();
+        }
+    }
+    pFolderDlg->Release();
 }
 
 void App::analyzeSelectedNode() {
