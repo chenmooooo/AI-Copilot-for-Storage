@@ -373,9 +373,17 @@ void App::updateFileTree(const FileNode* node, int depth) {
     label += ")";
 
     bool open = ImGui::TreeNodeEx(node, flags, "%s", label.c_str());
-    if (ImGui::IsItemClicked()) {
+
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
         m_impl->selectedNode = const_cast<FileNode*>(node);
-        analyzeSelectedNode();
+    }
+
+    if (ImGui::BeginPopupContextItem()) {
+        if (ImGui::MenuItem("AI Analysis")) {
+            m_impl->selectedNode = const_cast<FileNode*>(node);
+            analyzeSelectedNode();
+        }
+        ImGui::EndPopup();
     }
 
     if (open) {
