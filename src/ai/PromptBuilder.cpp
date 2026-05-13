@@ -97,6 +97,14 @@ std::string PromptBuilder::buildFullPrompt(const DirectoryContext& ctx) const {
 std::vector<ChatMessage> PromptBuilder::buildChatMessages(const DirectoryContext& ctx) const {
     std::vector<ChatMessage> msgs;
     msgs.push_back({"system", buildSystemPrompt()});
-    msgs.push_back({"user", buildAnalysisTask(ctx)});
+
+    std::string userMsg = buildAnalysisTask(ctx);
+    if (!ctx.topExtensions.empty()) {
+        userMsg += "\n\nFile extension distribution (top by size):\n";
+        for (const auto& [ext, size] : ctx.topExtensions) {
+            userMsg += "  " + ext + ": " + formatBytes(size) + "\n";
+        }
+    }
+    msgs.push_back({"user", userMsg});
     return msgs;
 }

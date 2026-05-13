@@ -16,6 +16,9 @@
 #include <sstream>
 #include <iomanip>
 #include <ctime>
+#include <unordered_map>
+#include <functional>
+#include <algorithm>
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -575,6 +578,30 @@ void App::openFolderPicker() {
     pFolderDlg->Release();
 }
 
+static std::vector<std::pair<std::string, int64_t>> collectExtensionStats(const FileNode* node) {
+    std::unordered_map<std::string, int64_t> extMap;
+    std::function<void(const FileNode*)> walk = [&](const FileNode* n) {
+        if (n->isFile()) {
+            std::string ext = n->extension();
+            if (!ext.empty()) {
+                extMap[ext] += n->sizeBytes;
+            } else {
+                extMap["(no extension)"] += n->sizeBytes;
+            }
+        }
+        for (const auto& child : n->children) {
+            walk(&child);
+        }
+    };
+    walk(node);
+    std::vector<std::pair<std::string, int64_t>> sorted(extMap.begin(), extMap.end());
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+        return a.second > b.second;
+    });
+    if (sorted.size() > 20) sorted.resize(20);
+    return sorted;
+}
+
 void App::analyzeSelectedNode() {
     if (!m_impl->selectedNode || m_impl->aiBusy) return;
 
@@ -586,6 +613,7 @@ void App::analyzeSelectedNode() {
     ctx.sizeBytes = m_impl->selectedNode->sizeBytes;
     ctx.fileCount = m_impl->selectedNode->fileCount;
     ctx.dirCount = m_impl->selectedNode->dirCount;
+    ctx.topExtensions = collectExtensionStats(m_impl->selectedNode);
 
     std::string narrowPath = m_impl->selectedNode->narrowPath();
     auto cached = m_database->loadAnalysis(narrowPath);
