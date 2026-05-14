@@ -5,6 +5,7 @@
 #include "db/Database.h"
 #include "core/FileNode.h"
 #include "core/Scanner.h"
+#include "core/NtfsScanner.h"
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -12,6 +13,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 
 #include <sstream>
 #include <iomanip>
@@ -42,6 +44,31 @@ static std::string formatTime(const std::chrono::system_clock::time_point& tp) {
     char buf[32];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &local);
     return buf;
+}
+
+static bool isVolumeRoot(const std::wstring& path) {
+    // "X:\" or "X:" or "X:" with trailing backslash
+    if (path.size() >= 2 && path[1] == L':') {
+        if (path.size() == 2) return true;
+        if (path.size() == 3 && (path[2] == L'\\' || path[2] == L'/')) return true;
+    }
+    return false;
+}
+
+static bool isProcessElevated() {
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) return false;
+    TOKEN_ELEVATION te;
+    DWORD size = 0;
+    bool elevated = GetTokenInformation(hToken, TokenElevation, &te, sizeof(te), &size) && te.TokenIsElevated;
+    CloseHandle(hToken);
+    return elevated;
+}
+
+static void restartAsAdmin(const char* path) {
+    WCHAR widePath[4096];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, widePath, 4096);
+    ShellExecuteW(nullptr, L"runas", widePath, nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 static std::string formatFileType(FileType type) {
@@ -85,13 +112,34 @@ struct App::Impl {
 
     // Stats
     int64_t scanBytes = 0;
+    int64_t scanBytesOnDisk = 0;
     size_t scanFiles = 0;
     size_t scanDirs = 0;
+    double scanTimeMs = 0.0;
     bool scanning = false;
+
+    // Scan mode: 0 = Auto, 1 = Legacy (FindFirstFile), 2 = NTFS Fast (MFT)
+    int scanMode = 0;
+    static const char* scanModeNames[3];
+
+    // Comparison snapshots
+    App::ScanResult results[2]; // index 0 = Legacy, 1 = NTFS
+
+    // Actual scan mode used (after Auto resolution)
+    int actualScanMode = 1;
+
+    // Rule evaluation cache (avoid re-evaluating every frame)
+    FileNode* ruleCacheNode = nullptr;
+    std::vector<RuleMatch> ruleCacheMatches;
+
+    // Last scan error message
+    std::string scanError;
 
     // Input
     char pathInput[1024] = "C:\\";
 };
+
+const char* App::Impl::scanModeNames[3] = { "Auto", "Legacy (FindFirstFile)", "NTFS Fast (MFT)" };
 
 App::App()
     : m_aiClient(AIClientFactory::create(AIClientFactory::DeepSeek))
@@ -314,7 +362,21 @@ void App::renderScannerPanel() {
         openFolderPicker();
     }
 
+    // Scan mode selector
+    ImGui::Combo("Scan Mode", &m_impl->scanMode, Impl::scanModeNames, 3);
+    if (m_impl->scanMode == 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Auto: uses NTFS for volume roots (C:\), Legacy for subdirectories");
+    } else if (m_impl->scanMode == 2) {
+        if (!isVolumeRoot(std::wstring(m_impl->pathInput, m_impl->pathInput + strlen(m_impl->pathInput)))) {
+            ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "Note: NTFS mode reads the full volume MFT.\nFor small directories, Legacy is faster.");
+        }
+    }
+
     if (ImGui::Button("Scan", ImVec2(120, 0))) {
+        m_impl->scanError.clear();
         std::wstring wpath;
         int len = MultiByteToWideChar(CP_UTF8, 0, m_impl->pathInput, -1, nullptr, 0);
         if (len > 0) {
@@ -330,12 +392,93 @@ void App::renderScannerPanel() {
         ImGui::Text("Scanning...");
     }
 
+    // Show scan error if any
+    if (!m_impl->scanError.empty()) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Error:");
+        ImGui::TextWrapped("%s", m_impl->scanError.c_str());
+        if (m_impl->scanMode == 1 && !isProcessElevated()) {
+            ImGui::Separator();
+            ImGui::Text("Tip: NTFS Fast scan needs Administrator privileges.");
+            char exePath[4096];
+            GetModuleFileNameA(nullptr, exePath, sizeof(exePath));
+            if (ImGui::Button("Restart as Administrator")) {
+                restartAsAdmin(exePath);
+            }
+        }
+    }
+
     if (m_impl->scanRoot) {
         ImGui::Separator();
         ImGui::Text("Path: %s", m_impl->scanRoot->narrowPath().c_str());
         ImGui::Text("Type: %s", m_impl->scanRoot->isDirectory() ? "Directory" : "File");
-        ImGui::Text("Size: %s", formatSize(m_impl->scanBytes).c_str());
+        if (m_impl->scanMode == 0)
+            ImGui::Text("Mode: Auto -> %s", Impl::scanModeNames[m_impl->actualScanMode]);
+        else
+            ImGui::Text("Mode: %s", Impl::scanModeNames[m_impl->actualScanMode]);
+        ImGui::Text("Elapsed: %.0f ms", m_impl->scanTimeMs);
+        ImGui::Text("Logical Size: %s", formatSize(m_impl->scanBytes).c_str());
+        ImGui::Text("Physical Size: %s", formatSize(m_impl->scanBytesOnDisk).c_str());
         ImGui::Text("Files: %zu  Dirs: %zu", m_impl->scanFiles, m_impl->scanDirs);
+    }
+
+    // Comparison section
+    bool hasLegacy = m_impl->results[0].elapsedMs > 0;
+    bool hasNtfs   = m_impl->results[1].elapsedMs > 0;
+    if (hasLegacy || hasNtfs) {
+        ImGui::Separator();
+        ImGui::Text("Speed Comparison");
+        if (ImGui::BeginTable("##cmp", 3,
+            ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+            ImGui::TableSetupColumn("");
+            ImGui::TableSetupColumn("Legacy");
+            ImGui::TableSetupColumn("NTFS Fast");
+            ImGui::TableHeadersRow();
+
+            auto row = [&](const char* label,
+                const char* leg, const char* ntfs) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::Text("%s", label);
+                ImGui::TableNextColumn(); ImGui::Text("%s", leg ? leg : "-");
+                ImGui::TableNextColumn(); ImGui::Text("%s", ntfs ? ntfs : "-");
+            };
+
+            auto fmt = [](double ms) {
+                static char buf[32];
+                if (ms < 1000) snprintf(buf, sizeof(buf), "%.0f ms", ms);
+                else           snprintf(buf, sizeof(buf), "%.2f s", ms / 1000);
+                return buf;
+            };
+
+            row("Time",
+                hasLegacy ? fmt(m_impl->results[0].elapsedMs) : nullptr,
+                hasNtfs   ? fmt(m_impl->results[1].elapsedMs) : nullptr);
+            row("Logical Size",
+                hasLegacy ? formatSize(m_impl->results[0].bytes).c_str() : nullptr,
+                hasNtfs   ? formatSize(m_impl->results[1].bytes).c_str() : nullptr);
+            row("Physical Size",
+                hasLegacy ? formatSize(m_impl->results[0].bytesOnDisk).c_str() : nullptr,
+                hasNtfs   ? formatSize(m_impl->results[1].bytesOnDisk).c_str() : nullptr);
+            row("Files",
+                hasLegacy ? std::to_string(m_impl->results[0].files).c_str() : nullptr,
+                hasNtfs   ? std::to_string(m_impl->results[1].files).c_str() : nullptr);
+            row("Dirs",
+                hasLegacy ? std::to_string(m_impl->results[0].dirs).c_str() : nullptr,
+                hasNtfs   ? std::to_string(m_impl->results[1].dirs).c_str() : nullptr);
+
+            // Speedup ratio
+            if (hasLegacy && hasNtfs && m_impl->results[1].elapsedMs > 0) {
+                double ratio = m_impl->results[0].elapsedMs / m_impl->results[1].elapsedMs;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::Text("Speedup");
+                ImGui::TableNextColumn(); ImGui::Text("1.00x");
+                char ratioBuf[32];
+                snprintf(ratioBuf, sizeof(ratioBuf), "%.1fx", ratio);
+                ImGui::TableNextColumn(); ImGui::Text("%s", ratioBuf);
+            }
+
+            ImGui::EndTable();
+        }
     }
 
     ImGui::End();
@@ -420,7 +563,11 @@ void App::renderAIPanel() {
 void App::renderRulePanel() {
     ImGui::Begin("Rule Matches");
     if (m_impl->selectedNode) {
-        auto matches = m_ruleEngine->evaluate(*m_impl->selectedNode);
+        if (m_impl->selectedNode != m_impl->ruleCacheNode) {
+            m_impl->ruleCacheNode = m_impl->selectedNode;
+            m_impl->ruleCacheMatches = m_ruleEngine->evaluate(*m_impl->selectedNode);
+        }
+        auto& matches = m_impl->ruleCacheMatches;
         if (matches.empty()) {
             ImGui::Text("No rule matches found.");
         } else {
@@ -432,6 +579,9 @@ void App::renderRulePanel() {
                 }
             }
         }
+    } else {
+        m_impl->ruleCacheNode = nullptr;
+        m_impl->ruleCacheMatches.clear();
     }
     ImGui::End();
 }
@@ -545,14 +695,60 @@ void App::scanPath(const std::wstring& path) {
     m_impl->selectedNode = nullptr;
     m_impl->aiResponse.clear();
 
-    Scanner scanner;
-    scanner.setRootPath(path);
-    m_impl->scanRoot = scanner.scan();
-    m_impl->scanBytes = scanner.totalBytes();
-    m_impl->scanFiles = scanner.totalFiles();
-    m_impl->scanDirs = scanner.totalDirs();
+    // Resolve Auto mode
+    int effectiveMode = m_impl->scanMode;
+    if (effectiveMode == 0) {
+        effectiveMode = isVolumeRoot(path) ? 2 : 1;
+    }
+    m_impl->actualScanMode = effectiveMode;
+
+    if (effectiveMode == 1) {
+        // Legacy scanner
+        Scanner scanner;
+        scanner.setRootPath(path);
+        m_impl->scanRoot = scanner.scan();
+        m_impl->scanBytes = scanner.totalBytes();
+        m_impl->scanBytesOnDisk = 0; // legacy scanner does not compute physical size
+        m_impl->scanFiles = scanner.totalFiles();
+        m_impl->scanDirs = scanner.totalDirs();
+        m_impl->scanTimeMs = scanner.elapsedMs();
+
+        storeScanResult("Legacy", scanner.elapsedMs(), scanner.totalBytes(), 0,
+                        scanner.totalFiles(), scanner.totalDirs());
+    } else {
+        // NTFS Fast scanner
+        NtfsScanner nscanner;
+        nscanner.setRootPath(path);
+        m_impl->scanRoot = nscanner.scan();
+
+        if (m_impl->scanRoot) {
+            m_impl->scanBytes = nscanner.totalBytes();
+            m_impl->scanBytesOnDisk = nscanner.totalBytesOnDisk();
+            m_impl->scanFiles = nscanner.totalFiles();
+            m_impl->scanDirs = nscanner.totalDirs();
+            m_impl->scanTimeMs = nscanner.elapsedMs();
+            m_impl->scanError.clear();
+        } else {
+            m_impl->scanError = nscanner.lastError();
+            if (m_impl->scanError.empty())
+                m_impl->scanError = "NTFS scan failed for unknown reason.";
+        }
+
+        storeScanResult("NTFS Fast", nscanner.elapsedMs(), nscanner.totalBytes(),
+                        nscanner.totalBytesOnDisk(), nscanner.totalFiles(), nscanner.totalDirs());
+    }
 
     m_impl->scanning = false;
+}
+
+void App::storeScanResult(const char* mode, double ms, int64_t bytes, int64_t bytesOnDisk, size_t files, size_t dirs) {
+    int idx = (m_impl->actualScanMode == 1) ? 0 : 1;
+    m_impl->results[idx].mode = mode;
+    m_impl->results[idx].elapsedMs = ms;
+    m_impl->results[idx].bytes = bytes;
+    m_impl->results[idx].bytesOnDisk = bytesOnDisk;
+    m_impl->results[idx].files = files;
+    m_impl->results[idx].dirs = dirs;
 }
 
 void App::openFolderPicker() {

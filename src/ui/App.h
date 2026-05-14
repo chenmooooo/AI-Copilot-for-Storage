@@ -43,6 +43,17 @@ private:
     void analyzeSelectedNode();
     void updateFileTree(const FileNode* node, int depth);
 
+    // Comparison snapshot
+    struct ScanResult {
+        std::string mode;
+        double elapsedMs = 0;
+        int64_t bytes = 0;
+        int64_t bytesOnDisk = 0;
+        size_t files = 0;
+        size_t dirs = 0;
+    };
+    void storeScanResult(const char* mode, double ms, int64_t bytes, int64_t bytesOnDisk, size_t files, size_t dirs);
+
     std::unique_ptr<AIClient>   m_aiClient;
     std::unique_ptr<RuleEngine> m_ruleEngine;
     std::unique_ptr<Database>   m_database;

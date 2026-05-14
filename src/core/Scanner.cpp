@@ -1,6 +1,7 @@
 #include "core/Scanner.h"
 #include <windows.h>
 #include <chrono>
+#include <algorithm>
 
 struct Scanner::Impl {
     std::wstring rootPath;
@@ -72,6 +73,11 @@ struct Scanner::Impl {
         } while (FindNextFileW(hFind, &findData));
 
         FindClose(hFind);
+
+        std::sort(parent->children.begin(), parent->children.end(),
+            [](const FileNode& a, const FileNode& b) {
+                return a.sizeBytes > b.sizeBytes;
+            });
     }
 
     static std::chrono::system_clock::time_point filetimeToChrono(const FILETIME& ft) {

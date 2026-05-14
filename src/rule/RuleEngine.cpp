@@ -16,11 +16,10 @@ struct RuleEngine::Impl {
                 m.score = 1.0;
                 matches.push_back(m);
             }
-
-            for (const auto& child : node.children) {
-                auto childMatches = matchNode(child);
-                matches.insert(matches.end(), childMatches.begin(), childMatches.end());
-            }
+        }
+        for (const auto& child : node.children) {
+            auto childMatches = matchNode(child);
+            matches.insert(matches.end(), childMatches.begin(), childMatches.end());
         }
         return matches;
     }

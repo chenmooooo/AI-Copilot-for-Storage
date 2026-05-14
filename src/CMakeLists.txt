@@ -6,6 +6,8 @@ add_library(core_lib STATIC
     core/FileNode.cpp
     core/Scanner.h
     core/Scanner.cpp
+    core/NtfsScanner.h
+    core/NtfsScanner.cpp
 )
 target_include_directories(core_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(core_lib PUBLIC nlohmann_json::nlohmann_json)
