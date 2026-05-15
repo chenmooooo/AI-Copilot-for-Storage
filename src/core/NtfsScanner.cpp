@@ -320,6 +320,11 @@ struct NtfsScanner::Impl {
             totalDirs++;
         }
 
+        std::sort(node.children.begin(), node.children.end(),
+            [](const FileNode& a, const FileNode& b) {
+                return a.sizeBytes > b.sizeBytes;
+            });
+
         return node;
     }
 

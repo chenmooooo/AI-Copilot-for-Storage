@@ -41,7 +41,7 @@ private:
     void scanPath(const std::wstring& path);
     void openFolderPicker();
     void analyzeSelectedNode();
-    void updateFileTree(const FileNode* node, int depth);
+    void updateFileTree(const FileNode* node, int depth, int64_t parentSize = 0);
 
     // Comparison snapshot
     struct ScanResult {

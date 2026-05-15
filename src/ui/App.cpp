@@ -494,7 +494,7 @@ void App::renderFileTreePanel() {
     ImGui::End();
 }
 
-void App::updateFileTree(const FileNode* node, int depth) {
+void App::updateFileTree(const FileNode* node, int depth, int64_t parentSize) {
     if (!node) return;
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_None;
@@ -512,6 +512,12 @@ void App::updateFileTree(const FileNode* node, int depth) {
 
     label += "  (" + formatFileType(node->type);
     label += ", " + formatSize(node->sizeBytes);
+    if (parentSize > 0) {
+        double pct = 100.0 * node->sizeBytes / parentSize;
+        char pctBuf[16];
+        snprintf(pctBuf, sizeof(pctBuf), " %.1f%%", pct);
+        label += pctBuf;
+    }
     label += ", " + formatTime(node->lastModified);
     label += ")";
 
@@ -531,7 +537,7 @@ void App::updateFileTree(const FileNode* node, int depth) {
 
     if (open) {
         for (const auto& child : node->children) {
-            updateFileTree(&child, depth + 1);
+            updateFileTree(&child, depth + 1, node->sizeBytes);
         }
         ImGui::TreePop();
     }
