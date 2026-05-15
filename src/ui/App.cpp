@@ -269,6 +269,22 @@ void App::setupImGui() {
 
     ImGui::StyleColorsDark();
 
+    // Load CJK-capable font for Chinese filename / AI response display
+    ImFontConfig cfg;
+    cfg.MergeMode = false;
+    ImFont* cjkFont = io.Fonts->AddFontFromFileTTF(
+        "C:\\Windows\\Fonts\\msyh.ttc", 15.0f, &cfg,
+        io.Fonts->GetGlyphRangesChineseFull());
+    if (!cjkFont) {
+        // Fallback: try SimSun for older Windows
+        cjkFont = io.Fonts->AddFontFromFileTTF(
+            "C:\\Windows\\Fonts\\simsun.ttc", 15.0f, nullptr,
+            io.Fonts->GetGlyphRangesChineseFull());
+    }
+    if (!cjkFont) {
+        io.Fonts->AddFontDefault();
+    }
+
     ImGui_ImplWin32_Init(m_impl->hwnd);
     ImGui_ImplDX11_Init(m_impl->d3dDevice, m_impl->d3dDeviceContext);
 }
