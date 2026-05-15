@@ -20,6 +20,8 @@ public:
     size_t  totalFiles() const { return m_totalFiles; }
     size_t  totalDirs()  const { return m_totalDirs; }
     double  elapsedMs()  const { return m_elapsedMs; }
+    double  scanTimeMs()  const { return m_scanTimeMs; }
+    double  buildTimeMs() const { return m_buildTimeMs; }
 
 private:
     struct Impl;
@@ -28,4 +30,6 @@ private:
     size_t m_totalFiles = 0;
     size_t m_totalDirs = 0;
     double m_elapsedMs = 0.0;
+    double m_scanTimeMs = 0.0;
+    double m_buildTimeMs = 0.0;
 };

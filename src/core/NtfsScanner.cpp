@@ -701,7 +701,11 @@ std::unique_ptr<FileNode> NtfsScanner::scan() {
 
     if (m_impl->cancelled) return nullptr;
 
+    m_scanTimeMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - m_impl->startTime).count();
+
     // Build tree from MFT maps
+    auto buildStart = std::chrono::steady_clock::now();
     auto components = splitPath(m_impl->rootPath);
     uint64_t targetRecord = m_impl->findRecordForPath(components);
 
@@ -724,6 +728,9 @@ std::unique_ptr<FileNode> NtfsScanner::scan() {
     rootNode->fileCount  = subtree.fileCount;
     rootNode->dirCount   = subtree.dirCount + 1;
     rootNode->childCount = rootNode->children.size();
+
+    m_buildTimeMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - buildStart).count();
 
     m_totalBytes       = m_impl->totalBytes;
     m_totalBytesOnDisk = m_impl->totalBytesOnDisk;

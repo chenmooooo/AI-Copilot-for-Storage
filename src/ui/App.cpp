@@ -116,6 +116,8 @@ struct App::Impl {
     size_t scanFiles = 0;
     size_t scanDirs = 0;
     double scanTimeMs = 0.0;
+    double scanIoMs = 0.0;
+    double scanBuildMs = 0.0;
     bool scanning = false;
 
     // Scan mode: 0 = Auto, 1 = Legacy (FindFirstFile), 2 = NTFS Fast (MFT)
@@ -416,7 +418,11 @@ void App::renderScannerPanel() {
             ImGui::Text("Mode: Auto -> %s", Impl::scanModeNames[m_impl->actualScanMode]);
         else
             ImGui::Text("Mode: %s", Impl::scanModeNames[m_impl->actualScanMode]);
-        ImGui::Text("Elapsed: %.0f ms", m_impl->scanTimeMs);
+        ImGui::Text("Total: %.0f ms", m_impl->scanTimeMs);
+        if (m_impl->scanIoMs > 0 || m_impl->scanBuildMs > 0) {
+            ImGui::Text("  Scan I/O:  %.0f ms", m_impl->scanIoMs);
+            ImGui::Text("  Build:     %.0f ms", m_impl->scanBuildMs);
+        }
         ImGui::Text("Logical Size: %s", formatSize(m_impl->scanBytes).c_str());
         ImGui::Text("Physical Size: %s", formatSize(m_impl->scanBytesOnDisk).c_str());
         ImGui::Text("Files: %zu  Dirs: %zu", m_impl->scanFiles, m_impl->scanDirs);
@@ -450,9 +456,15 @@ void App::renderScannerPanel() {
                 return buf;
             };
 
-            row("Time",
+            row("Total",
                 hasLegacy ? fmt(m_impl->results[0].elapsedMs) : nullptr,
                 hasNtfs   ? fmt(m_impl->results[1].elapsedMs) : nullptr);
+            row("Scan I/O",
+                hasLegacy && m_impl->results[0].scanMs > 0 ? fmt(m_impl->results[0].scanMs) : nullptr,
+                hasNtfs   && m_impl->results[1].scanMs > 0 ? fmt(m_impl->results[1].scanMs) : nullptr);
+            row("Build",
+                hasLegacy && m_impl->results[0].buildMs > 0 ? fmt(m_impl->results[0].buildMs) : nullptr,
+                hasNtfs   && m_impl->results[1].buildMs > 0 ? fmt(m_impl->results[1].buildMs) : nullptr);
             row("Logical Size",
                 hasLegacy ? formatSize(m_impl->results[0].bytes).c_str() : nullptr,
                 hasNtfs   ? formatSize(m_impl->results[1].bytes).c_str() : nullptr);
@@ -718,8 +730,11 @@ void App::scanPath(const std::wstring& path) {
         m_impl->scanFiles = scanner.totalFiles();
         m_impl->scanDirs = scanner.totalDirs();
         m_impl->scanTimeMs = scanner.elapsedMs();
+        m_impl->scanIoMs = scanner.scanTimeMs();
+        m_impl->scanBuildMs = scanner.buildTimeMs();
 
-        storeScanResult("Legacy", scanner.elapsedMs(), scanner.totalBytes(), 0,
+        storeScanResult("Legacy", scanner.elapsedMs(), scanner.scanTimeMs(), scanner.buildTimeMs(),
+                        scanner.totalBytes(), 0,
                         scanner.totalFiles(), scanner.totalDirs());
     } else {
         // NTFS Fast scanner
@@ -733,6 +748,8 @@ void App::scanPath(const std::wstring& path) {
             m_impl->scanFiles = nscanner.totalFiles();
             m_impl->scanDirs = nscanner.totalDirs();
             m_impl->scanTimeMs = nscanner.elapsedMs();
+            m_impl->scanIoMs = nscanner.scanTimeMs();
+            m_impl->scanBuildMs = nscanner.buildTimeMs();
             m_impl->scanError.clear();
         } else {
             m_impl->scanError = nscanner.lastError();
@@ -740,17 +757,21 @@ void App::scanPath(const std::wstring& path) {
                 m_impl->scanError = "NTFS scan failed for unknown reason.";
         }
 
-        storeScanResult("NTFS Fast", nscanner.elapsedMs(), nscanner.totalBytes(),
+        storeScanResult("NTFS Fast", nscanner.elapsedMs(), nscanner.scanTimeMs(), nscanner.buildTimeMs(),
+                        nscanner.totalBytes(),
                         nscanner.totalBytesOnDisk(), nscanner.totalFiles(), nscanner.totalDirs());
     }
 
     m_impl->scanning = false;
 }
 
-void App::storeScanResult(const char* mode, double ms, int64_t bytes, int64_t bytesOnDisk, size_t files, size_t dirs) {
+void App::storeScanResult(const char* mode, double ms, double scanMs, double buildMs,
+                          int64_t bytes, int64_t bytesOnDisk, size_t files, size_t dirs) {
     int idx = (m_impl->actualScanMode == 1) ? 0 : 1;
     m_impl->results[idx].mode = mode;
     m_impl->results[idx].elapsedMs = ms;
+    m_impl->results[idx].scanMs = scanMs;
+    m_impl->results[idx].buildMs = buildMs;
     m_impl->results[idx].bytes = bytes;
     m_impl->results[idx].bytesOnDisk = bytesOnDisk;
     m_impl->results[idx].files = files;

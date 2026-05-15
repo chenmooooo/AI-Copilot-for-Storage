@@ -9,6 +9,7 @@ struct Scanner::Impl {
     std::unique_ptr<FileNode> rootNode;
     volatile bool cancelled = false;
     std::chrono::steady_clock::time_point startTime;
+    std::chrono::steady_clock::time_point scanStartTime;
 
     int64_t scanBytes = 0;
     size_t scanFiles = 0;
@@ -125,11 +126,15 @@ std::unique_ptr<FileNode> Scanner::scan() {
     else
         m_impl->rootNode->name = m_impl->rootPath;
 
+    m_impl->scanStartTime = std::chrono::steady_clock::now();
     m_impl->scanDirectory(m_impl->rootNode.get(), m_impl->rootPath);
+    m_scanTimeMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - m_impl->scanStartTime).count();
 
     m_impl->rootNode->fileCount = m_impl->scanFiles;
     m_impl->rootNode->dirCount = m_impl->scanDirs + 1;
     m_impl->rootNode->childCount = (int)m_impl->rootNode->children.size();
+    auto buildStart = std::chrono::steady_clock::now();
     m_impl->rootNode->sizeBytes = 0;
     for (auto& child : m_impl->rootNode->children) {
         m_impl->rootNode->sizeBytes += child.sizeBytes;
@@ -138,6 +143,9 @@ std::unique_ptr<FileNode> Scanner::scan() {
     m_totalBytes = m_impl->rootNode->sizeBytes;
     m_totalFiles = m_impl->scanFiles;
     m_totalDirs = m_impl->scanDirs + 1;
+    m_buildTimeMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - buildStart).count();
+
     m_elapsedMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - m_impl->startTime).count();
 
