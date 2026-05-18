@@ -1,5 +1,10 @@
 #include "db/Database.h"
 #include <stdexcept>
+#include <windows.h>
+
+static void dbLog(const char* msg) {
+    OutputDebugStringA(msg);
+}
 
 struct Database::Impl {
     sqlite3* db = nullptr;
@@ -36,6 +41,8 @@ bool Database::isOpen() const {
 bool Database::exec(const std::string& sql) {
     char* err = nullptr;
     if (sqlite3_exec(m_impl->db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
+        std::string log = "[DB] exec failed: " + std::string(err) + "\n  SQL: " + sql + "\n";
+        dbLog(log.c_str());
         sqlite3_free(err);
         return false;
     }
@@ -45,6 +52,8 @@ bool Database::exec(const std::string& sql) {
 bool Database::prepareAndExec(const std::string& sql, const std::vector<std::string>& params) {
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_impl->db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        std::string log = "[DB] prepare failed: " + std::string(sqlite3_errmsg(m_impl->db)) + "\n  SQL: " + sql + "\n";
+        dbLog(log.c_str());
         return false;
     }
 
@@ -53,6 +62,10 @@ bool Database::prepareAndExec(const std::string& sql, const std::vector<std::str
     }
 
     bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!ok) {
+        std::string log = "[DB] step failed: " + std::string(sqlite3_errmsg(m_impl->db)) + "\n  SQL: " + sql + "\n";
+        dbLog(log.c_str());
+    }
     sqlite3_finalize(stmt);
     return ok;
 }
@@ -80,17 +93,18 @@ bool Database::migrate() {
 }
 
 bool Database::saveAnalysis(const std::string& path, const json& result) {
-    prepareAndExec(
+    return prepareAndExec(
         "INSERT OR REPLACE INTO analysis_cache (path, result) VALUES (?, ?)",
         {path, result.dump()}
     );
-    return true;
 }
 
-std::optional<json> Database::loadAnalysis(const std::string& path) {
+    std::optional<json> Database::loadAnalysis(const std::string& path) {
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "SELECT result FROM analysis_cache WHERE path = ? ORDER BY id DESC LIMIT 1";
     if (sqlite3_prepare_v2(m_impl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::string log = "[DB] loadAnalysis prepare failed: " + std::string(sqlite3_errmsg(m_impl->db)) + "\n";
+        dbLog(log.c_str());
         return std::nullopt;
     }
 
@@ -119,6 +133,8 @@ std::optional<std::string> Database::loadConfig(const std::string& key) {
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "SELECT value FROM config WHERE key = ?";
     if (sqlite3_prepare_v2(m_impl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::string log = "[DB] loadConfig prepare failed: " + std::string(sqlite3_errmsg(m_impl->db)) + "\n";
+        dbLog(log.c_str());
         return std::nullopt;
     }
 
@@ -149,6 +165,8 @@ std::vector<json> Database::loadScanHistory(int limit) {
     std::string sql = "SELECT path, total_bytes, total_files, created_at "
                       "FROM scan_history ORDER BY id DESC LIMIT ?";
     if (sqlite3_prepare_v2(m_impl->db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        std::string log = "[DB] loadScanHistory prepare failed: " + std::string(sqlite3_errmsg(m_impl->db)) + "\n";
+        dbLog(log.c_str());
         return results;
     }
 

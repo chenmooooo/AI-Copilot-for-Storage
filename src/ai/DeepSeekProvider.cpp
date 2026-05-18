@@ -26,7 +26,11 @@ ChatResponse DeepSeekProvider::chat(const ChatRequest& req) {
     ChatResponse resp;
     if (r.status_code != 200) {
         resp.success = false;
-        resp.errorMsg = "HTTP " + std::to_string(r.status_code) + ": " + r.text;
+        if (r.status_code == 0 && !r.error.message.empty()) {
+            resp.errorMsg = "NetworkError: " + r.error.message;
+        } else {
+            resp.errorMsg = "HTTP " + std::to_string(r.status_code) + ": " + r.text;
+        }
         return resp;
     }
 

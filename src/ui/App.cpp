@@ -849,6 +849,28 @@ static std::vector<std::pair<std::string, int64_t>> collectExtensionStats(const 
     return sorted;
 }
 
+static std::string categorizeAiError(const std::string& errorMsg) {
+    if (errorMsg.find("HTTP 401") != std::string::npos || errorMsg.find("Authentication") != std::string::npos) {
+        return "认证失败：API Key 无效，请在 工具 → 配置 中检查 API Key 设置。";
+    }
+    if (errorMsg.find("HTTP 402") != std::string::npos) {
+        return "余额不足：账户已欠费，请充值后重试。";
+    }
+    if (errorMsg.find("HTTP 429") != std::string::npos) {
+        return "请求过于频繁：请稍后重试。";
+    }
+    if (errorMsg.find("HTTP 5") != std::string::npos) {
+        return "AI 服务端错误：服务暂时不可用，请稍后重试。";
+    }
+    if (errorMsg.find("NetworkError") != std::string::npos || errorMsg.find("Timeout") != std::string::npos || errorMsg.find("timed out") != std::string::npos) {
+        return "网络连接失败：无法连接到 AI 服务，请检查网络连接和 API Base URL 配置。";
+    }
+    if (errorMsg.find("parse") != std::string::npos || errorMsg.find("json") != std::string::npos) {
+        return "AI 响应解析失败：返回格式异常，请重试。";
+    }
+    return "分析失败：" + errorMsg;
+}
+
 void App::analyzeSelectedNode() {
     if (!m_impl->selectedNode || m_impl->aiBusy) return;
 
@@ -890,7 +912,7 @@ void App::analyzeSelectedNode() {
             m_database->saveAnalysis(narrowPath, resp.content);
         }
     } else {
-        m_impl->aiResponse = "Error: " + resp.errorMsg;
+        m_impl->aiResponse = categorizeAiError(resp.errorMsg);
     }
 
     m_impl->aiBusy = false;
