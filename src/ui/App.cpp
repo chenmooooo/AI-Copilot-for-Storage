@@ -21,6 +21,8 @@
 #include <unordered_map>
 #include <functional>
 #include <algorithm>
+#include <future>
+#include <mutex>
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -133,6 +135,13 @@ struct App::Impl {
     // Rule evaluation cache (avoid re-evaluating every frame)
     FileNode* ruleCacheNode = nullptr;
     std::vector<RuleMatch> ruleCacheMatches;
+
+    // Async AI state
+    std::future<void> aiFuture;
+    std::mutex aiMutex;
+    std::string aiStreamBuffer;
+    bool aiFromCache = false;
+    bool aiForceRefresh = false;
 
     // Last scan error message
     std::string scanError;
@@ -333,6 +342,11 @@ void App::run() {
 }
 
 void App::shutdown() {
+    // Wait for any in-flight AI analysis to complete
+    if (m_impl->aiFuture.valid()) {
+        m_impl->aiFuture.wait();
+    }
+
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -573,19 +587,52 @@ void App::updateFileTree(const FileNode* node, int depth, int64_t parentSize) {
 
 void App::renderAIPanel() {
     ImGui::Begin("AI Analysis");
+
+    // Poll async AI completion
+    if (m_impl->aiBusy && m_impl->aiFuture.valid() &&
+        m_impl->aiFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        m_impl->aiFuture.get();
+        m_impl->aiBusy = false;
+    }
+
     if (m_impl->selectedNode) {
         ImGui::TextWrapped("Analyzing: %s", m_impl->selectedNode->narrowPath().c_str());
 
         if (m_impl->aiBusy) {
-            ImGui::Text("Waiting for AI response...");
-        }
+            // Spinner animation
+            static const char spinner[] = "|/-\\";
+            int frame = (int)(ImGui::GetTime() * 10.0) % 4;
+            ImGui::Text("AI \u5206\u6790\u4e2d... %c", spinner[frame]);
 
-        if (!m_impl->aiResponse.empty()) {
-            ImGui::Separator();
-            ImGui::TextWrapped("%s", m_impl->aiResponse.c_str());
+            // Streaming text
+            std::string streamText;
+            {
+                std::lock_guard<std::mutex> lock(m_impl->aiMutex);
+                streamText = m_impl->aiStreamBuffer;
+            }
+            if (!streamText.empty()) {
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", streamText.c_str());
+            }
+        } else {
+            // Cache source badge
+            if (m_impl->aiFromCache) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1), "(\u6765\u6e90\uff1a\u7f13\u5b58)");
+            }
 
-            if (ImGui::Button("Copy")) {
-                ImGui::SetClipboardText(m_impl->aiResponse.c_str());
+            if (!m_impl->aiResponse.empty()) {
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", m_impl->aiResponse.c_str());
+
+                if (ImGui::Button("Copy")) {
+                    ImGui::SetClipboardText(m_impl->aiResponse.c_str());
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("\u91cd\u65b0\u5206\u6790")) {
+                    m_impl->aiForceRefresh = true;
+                    analyzeSelectedNode();
+                }
             }
         }
     } else {
@@ -874,9 +921,7 @@ static std::string categorizeAiError(const std::string& errorMsg) {
 void App::analyzeSelectedNode() {
     if (!m_impl->selectedNode || m_impl->aiBusy) return;
 
-    m_impl->aiBusy = true;
-    m_impl->aiResponse.clear();
-
+    // Snapshot context on UI thread (FileNode tree may change later)
     DirectoryContext ctx;
     ctx.path = m_impl->selectedNode->fullPath;
     ctx.sizeBytes = m_impl->selectedNode->sizeBytes;
@@ -885,35 +930,92 @@ void App::analyzeSelectedNode() {
     ctx.topExtensions = collectExtensionStats(m_impl->selectedNode);
 
     std::string narrowPath = m_impl->selectedNode->narrowPath();
-    auto cached = m_database->loadAnalysis(narrowPath);
-    if (cached && !cached->empty()) {
-        m_impl->aiResponse = cached->dump(2);
-        m_impl->aiBusy = false;
-        return;
+
+    // Fast cache check on UI thread (unless force refresh)
+    if (!m_impl->aiForceRefresh) {
+        auto cached = m_database->loadAnalysis(narrowPath);
+        if (cached && !cached->empty()) {
+            m_impl->aiResponse = cached->dump(2);
+            m_impl->aiFromCache = true;
+            return;
+        }
+    }
+    m_impl->aiForceRefresh = false;
+
+    // Prepare async launch
+    m_impl->aiBusy = true;
+    m_impl->aiFromCache = false;
+    m_impl->aiResponse.clear();
+    {
+        std::lock_guard<std::mutex> lock(m_impl->aiMutex);
+        m_impl->aiStreamBuffer.clear();
     }
 
     PromptBuilder builder;
     auto messages = builder.buildChatMessages(ctx);
+    std::string model = m_impl->apiModel;
 
-    ChatRequest req;
-    req.messages = messages;
-    req.model = m_impl->apiModel;
+    // Launch AI call in background thread
+    m_impl->aiFuture = std::async(std::launch::async, [
+        this,
+        messages = std::move(messages),
+        model,
+        narrowPath
+    ]() {
+        auto doRetry = false;
 
-    auto resp = m_aiClient->chat(req);
-    if (resp.success) {
-        m_impl->aiResponse = resp.content;
-        try {
-            json j = json::parse(resp.content, nullptr, false);
-            m_database->saveAnalysis(narrowPath, j);
-            if (j.contains("category")) {
-                m_impl->selectedNode->category = j["category"].get<std::string>();
+        // -- First attempt: streaming --
+        {
+            ChatRequest req;
+            req.messages = messages;
+            req.model = model;
+            req.stream = true;
+
+            bool ok = m_aiClient->chatStream(req, [this](const std::string& chunk) {
+                std::lock_guard<std::mutex> lock(m_impl->aiMutex);
+                m_impl->aiStreamBuffer += chunk;
+            });
+
+            if (ok) {
+                std::lock_guard<std::mutex> lock(m_impl->aiMutex);
+                m_impl->aiResponse = m_impl->aiStreamBuffer;
+                return;
             }
-        } catch (...) {
-            m_database->saveAnalysis(narrowPath, resp.content);
+            doRetry = true;
         }
-    } else {
-        m_impl->aiResponse = categorizeAiError(resp.errorMsg);
-    }
 
-    m_impl->aiBusy = false;
+        // -- Retry: non-streaming fallback (handles timeout/auth errors better) --
+        if (doRetry) {
+            ChatRequest req;
+            req.messages = messages;
+            req.model = model;
+            req.stream = false;
+
+            auto resp = m_aiClient->chat(req);
+            if (resp.success) {
+                m_impl->aiResponse = resp.content;
+                {
+                    std::lock_guard<std::mutex> lock(m_impl->aiMutex);
+                    m_impl->aiStreamBuffer = resp.content;
+                }
+            } else {
+                m_impl->aiResponse = categorizeAiError(resp.errorMsg);
+                return;
+            }
+        }
+
+        // Cache result on success
+        if (!m_impl->aiResponse.empty()) {
+            try {
+                json j = json::parse(m_impl->aiResponse, nullptr, false);
+                if (!j.is_discarded()) {
+                    m_database->saveAnalysis(narrowPath, j);
+                } else {
+                    m_database->saveAnalysis(narrowPath, m_impl->aiResponse);
+                }
+            } catch (...) {
+                m_database->saveAnalysis(narrowPath, m_impl->aiResponse);
+            }
+        }
+    });
 }
